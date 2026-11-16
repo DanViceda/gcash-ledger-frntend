@@ -1,0 +1,46 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { cents,feeFor,jsonMoney } from '../src/utils/money.js'
+import { applyFunding, delta } from '../src/modules/balances/ledger.js'
+import { requestHash } from '../src/utils/idempotency.js'
+import { normalizePhone } from '../src/utils/phone.js'
+
+test('fee is rounded up by each 50000 centavos with 500 centavos per step',()=>{
+ assert.equal(feeFor(1n,50000n,500n),500n)
+ assert.equal(feeFor(50000n,50000n,500n),500n)
+ assert.equal(feeFor(50001n,50000n,500n),1000n)
+})
+test('incoming centavos are exact and bounded to PostgreSQL BIGINT',()=>{
+ assert.equal(cents('9007199254740993').toString(),'9007199254740993')
+ assert.equal(jsonMoney(9007199254740993n),'9007199254740993')
+ assert.equal(jsonMoney(100n),100)
+ assert.throws(()=>cents('9223372036854775808'))
+ assert.throws(()=>cents('1.25'))
+ assert.throws(()=>cents(Number.MAX_SAFE_INTEGER + 1),/exact integer/i)
+ assert.equal(cents(String(Number.MAX_SAFE_INTEGER + 1)).toString(),'9007199254740992')
+})
+test('ledger deltas preserve the fee invariant across transaction types and modes',()=>{
+ for(const type of ['CASH_IN','CASH_OUT','LOAD'])for(const mode of ['ON_TOP','DEDUCTED']){
+  const [cash,gcash]=delta(type,mode,10000n,500n)
+  assert.equal(cash+gcash,500n)
+ }
+ assert.deepEqual(delta('CASH_IN','ON_TOP',10000n,500n),[10500n,-10000n])
+ assert.deepEqual(delta('CASH_OUT','DEDUCTED',10000n,500n),[-9500n,10000n])
+})
+test('balance funding increases only the selected account and rejects invalid amounts',()=>{
+ const opening={cash:1000n,gcash:2000n}
+ assert.deepEqual(applyFunding(opening,'CASH',500n),{cash:1500n,gcash:2000n})
+ assert.deepEqual(applyFunding(opening,'GCASH',500n),{cash:1000n,gcash:2500n})
+ assert.throws(()=>applyFunding(opening,'CASH',0n),/positive/i)
+ assert.throws(()=>applyFunding(opening,'OTHER',500n),/invalid/i)
+})
+test('idempotency payload hash ignores object key order but captures value changes',()=>{
+ assert.equal(requestHash({a:1,b:2}),requestHash({b:2,a:1}))
+ assert.notEqual(requestHash({a:1}),requestHash({a:2}))
+})
+test('Philippine mobile validation accepts exactly 09 plus nine digits',()=>{
+ assert.equal(normalizePhone('09655432132'),'09655432132')
+ for (const phone of ['9655432132','0965543213','096554321321','08123456789','09ABC543213','09-655432132',' 09655432132 ']) {
+  assert.throws(()=>normalizePhone(phone),{status:400})
+ }
+})
