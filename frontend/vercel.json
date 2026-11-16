@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/:path((auth|customers|balances|transactions|reports)(/.*)?)",
+      "destination": "https://gcash-ledger-frntend.onrender.com/:path"
+    }
+  ]
+}
