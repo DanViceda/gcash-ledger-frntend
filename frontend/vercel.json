@@ -1,8 +1,24 @@
 {
   "rewrites": [
     {
-      "source": "/:path((auth|customers|balances|transactions|reports)(/.*)?)",
-      "destination": "https://gcash-ledger-frntend.onrender.com/:path"
+      "source": "/auth/:path*",
+      "destination": "https://gcash-ledger-frntend.onrender.com/auth/:path*"
+    },
+    {
+      "source": "/customers/:path*",
+      "destination": "https://gcash-ledger-frntend.onrender.com/customers/:path*"
+    },
+    {
+      "source": "/balances/:path*",
+      "destination": "https://gcash-ledger-frntend.onrender.com/balances/:path*"
+    },
+    {
+      "source": "/transactions/:path*",
+      "destination": "https://gcash-ledger-frntend.onrender.com/transactions/:path*"
+    },
+    {
+      "source": "/reports/:path*",
+      "destination": "https://gcash-ledger-frntend.onrender.com/reports/:path*"
     }
   ]
 }
