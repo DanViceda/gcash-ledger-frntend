@@ -4,11 +4,14 @@ import { asyncRoute } from '../../middleware/errors.js'
 import { cents, jsonMoney } from '../../utils/money.js'
 import { pageParams, paged, idParam } from '../../utils/http.js'
 import { keyFrom, idempotent } from '../../utils/idempotency.js'
-import { lockOpening, expectedBalances, ensureNonnegative, safeBalanceView } from './ledger.js'
+import { lockOpening, expectedBalances, ensureNonnegative, safeBalanceView, applyAdjustment } from './ledger.js'
+import { parseAdjustmentRequest } from './adjustments.js'
 export const balancesRouter=Router()
 const openingView=r=>({id:r.id,cashCentavos:jsonMoney(r.cash_centavos),gcashCentavos:jsonMoney(r.gcash_centavos),initializedBy:r.username,createdAt:r.created_at})
 const fundingSql='SELECT f.*,a.username FROM balance_fundings f JOIN admins a ON a.id=f.added_by'
 const fundingView=r=>({id:r.id,account:r.account,amountCentavos:jsonMoney(r.amount_centavos),notes:r.notes,addedBy:r.username,createdAt:r.created_at})
+const adjustmentSql='SELECT x.*,a.username FROM balance_adjustments x JOIN admins a ON a.id=x.created_by'
+const adjustmentView=r=>({id:r.id,account:r.account,adjustmentType:r.adjustment_type,amountCentavos:jsonMoney(r.amount_centavos),reason:r.reason,createdBy:r.username,createdAt:r.created_at,previousCashCentavos:jsonMoney(r.previous_cash_centavos),previousGcashCentavos:jsonMoney(r.previous_gcash_centavos),resultingCashCentavos:jsonMoney(r.resulting_cash_centavos),resultingGcashCentavos:jsonMoney(r.resulting_gcash_centavos)})
 function transferView(r){return{id:r.id,direction:r.source==='CASH'?'CASH_TO_GCASH':'GCASH_TO_CASH',source:r.source,destination:r.destination,amountCentavos:jsonMoney(r.amount_centavos),notes:r.notes,createdBy:r.username,createdAt:r.created_at,previousCashCentavos:jsonMoney(r.previous_cash_centavos),previousGcashCentavos:jsonMoney(r.previous_gcash_centavos),resultingCashCentavos:jsonMoney(r.resulting_cash_centavos),resultingGcashCentavos:jsonMoney(r.resulting_gcash_centavos),reversalOfId:r.reversal_of_id}}
 const transferSql='SELECT t.*,a.username FROM balance_transfers t JOIN admins a ON a.id=t.created_by'
 balancesRouter.get('/opening',asyncRoute(async(_req,res)=>{const{rows}=await pool.query('SELECT o.*,a.username FROM opening_balances o JOIN admins a ON a.id=o.initialized_by WHERE o.id=1');if(!rows[0])throw Object.assign(new Error('Opening balances have not been initialized.'),{status:404});res.json(openingView(rows[0]))}))
@@ -27,6 +30,19 @@ balancesRouter.post('/fundings',asyncRoute(async(req,res)=>{
  res.status(201).json(result)
 }))
 balancesRouter.get('/fundings',asyncRoute(async(req,res)=>{const{page,size,offset}=pageParams(req.query);const[items,total]=await Promise.all([pool.query(`${fundingSql} ORDER BY f.created_at DESC,f.id DESC LIMIT $1 OFFSET $2`,[size,offset]),pool.query('SELECT count(*) FROM balance_fundings')]);res.json(paged(items.rows.map(fundingView),page,size,total.rows[0].count))}))
+balancesRouter.post('/adjustments',asyncRoute(async(req,res)=>{
+ const {account,adjustmentType,amount,reason}=parseAdjustmentRequest(req.body)
+ const key=keyFrom(req),payload={account,adjustmentType,amountCentavos:amount.toString(),reason}
+ const result=await transaction(async(client)=>idempotent(client,req.admin.id,'BALANCE_ADJUSTMENT_CREATE',key,payload,async()=>{
+  const opening=await lockOpening(client),before=await expectedBalances(client,opening),after=applyAdjustment(before,account,adjustmentType,amount)
+  ensureNonnegative(after,'Insufficient balance for this deduction.')
+  const{rows}=await client.query('INSERT INTO balance_adjustments(account,adjustment_type,amount_centavos,reason,created_by,previous_cash_centavos,previous_gcash_centavos,resulting_cash_centavos,resulting_gcash_centavos) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id',[account,adjustmentType,amount.toString(),reason,req.admin.id,before.cash.toString(),before.gcash.toString(),after.cash.toString(),after.gcash.toString()])
+  return adjustmentView((await client.query(`${adjustmentSql} WHERE x.id=$1`,[rows[0].id])).rows[0])
+ }))
+ res.status(201).json(result)
+}))
+balancesRouter.get('/adjustments',asyncRoute(async(req,res)=>{const{page,size,offset}=pageParams(req.query);const[items,total]=await Promise.all([pool.query(`${adjustmentSql} ORDER BY x.created_at DESC,x.id DESC LIMIT $1 OFFSET $2`,[size,offset]),pool.query('SELECT count(*) FROM balance_adjustments')]);res.json(paged(items.rows.map(adjustmentView),page,size,total.rows[0].count))}))
+balancesRouter.get('/adjustments/:id',asyncRoute(async(req,res)=>{const{rows}=await pool.query(`${adjustmentSql} WHERE x.id=$1`,[idParam(req.params.id)]);if(!rows[0])throw Object.assign(new Error('Balance adjustment not found.'),{status:404});res.json(adjustmentView(rows[0]))}))
 balancesRouter.post('/transfers',asyncRoute(async(req,res)=>{const{direction,amountCentavos,notes=null}=req.body??{};if(!['CASH_TO_GCASH','GCASH_TO_CASH'].includes(direction))throw Object.assign(new Error('Transfer direction is required.'),{status:400});const amount=cents(amountCentavos,'Transfer amount',{positive:true}),key=keyFrom(req),payload={direction,amountCentavos:amount.toString(),notes:notes?.trim()||null};const result=await transaction(async(client)=>idempotent(client,req.admin.id,'TRANSFER_CREATE',key,payload,async()=>{const opening=await lockOpening(client),before=await expectedBalances(client,opening),source=direction==='CASH_TO_GCASH'?'CASH':'GCASH',destination=source==='CASH'?'GCASH':'CASH',after={...before};if(source==='CASH'){after.cash-=amount;after.gcash+=amount}else{after.gcash-=amount;after.cash+=amount}ensureNonnegative(after,'Insufficient source balance for transfer.');const{rows}=await client.query('INSERT INTO balance_transfers(source,destination,amount_centavos,notes,created_by,previous_cash_centavos,previous_gcash_centavos,resulting_cash_centavos,resulting_gcash_centavos) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id',[source,destination,amount.toString(),payload.notes,req.admin.id,before.cash.toString(),before.gcash.toString(),after.cash.toString(),after.gcash.toString()]);return transferView((await client.query(`${transferSql} WHERE t.id=$1`,[rows[0].id])).rows[0])}));res.status(201).json(result)}))
 balancesRouter.get('/transfers',asyncRoute(async(req,res)=>{const{page,size,offset}=pageParams(req.query);const[items,total]=await Promise.all([pool.query(`${transferSql} ORDER BY t.created_at DESC,t.id DESC LIMIT $1 OFFSET $2`,[size,offset]),pool.query('SELECT count(*) FROM balance_transfers')]);res.json(paged(items.rows.map(transferView),page,size,total.rows[0].count))}))
 balancesRouter.get('/transfers/:id',asyncRoute(async(req,res)=>{const{rows}=await pool.query(`${transferSql} WHERE t.id=$1`,[idParam(req.params.id)]);if(!rows[0])throw Object.assign(new Error('Transfer not found.'),{status:404});res.json(transferView(rows[0]))}))

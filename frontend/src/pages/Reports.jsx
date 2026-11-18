@@ -25,7 +25,7 @@ function ReportsPage() {
       weekStart.setDate(weekStart.getDate() - 6)
       const lastSevenDays = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Manila', year: 'numeric', month: '2-digit', day: '2-digit' }).format(weekStart)
       const [todayResult, earnings, weekly] = await Promise.all([api.get('/reports/today'), api.get('/reports/earnings', { params: { from, to, groupBy } }), api.get('/reports/earnings', { params: { from: lastSevenDays, to: today, groupBy: 'day' } })])
-      setSummary(todayResult.data); setReport(earnings.data); setServiceBreakdown(weekly.data.periods || [])
+      setSummary(todayResult.data); setReport(earnings.data); setServiceBreakdown([...(weekly.data.periods || [])].sort((a, b) => b.periodStart.localeCompare(a.periodStart)))
     } catch (err) { setError(errorMessage(err, 'Could not load reports.')) }
     finally { setLoading(false) }
   }, [from, to, groupBy, today, setError, setLoading, setReport, setServiceBreakdown, setSummary])

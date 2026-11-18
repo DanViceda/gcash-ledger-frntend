@@ -48,7 +48,7 @@ function DashboardPage() {
     </section>
     <section className="quick-actions"><div className="section-header"><div><h2>New transaction</h2></div></div><div className="quick-grid">{actions.map(([type, label, Icon]) => <button key={type} className="quick-card" onClick={() => navigate(`/transactions/new?type=${type}`)}><span className={`quick-icon ${type.toLowerCase()}`}><Icon size={19} /></span><span><strong>{label}</strong></span><ArrowRight size={17} className="quick-arrow" /></button>)}</div></section>
     <section className="panel recent-panel dashboard-history"><div className="section-header"><div><h2>Recent transactions</h2></div><button className="button button-quiet" onClick={() => navigate('/transactions')}>View all <ArrowRight size={16} /></button></div>
-      {loading ? <div className="skeleton-list"><Skeleton/><Skeleton/><Skeleton/></div> : recent.length ? <TransactionTable items={recent.slice(0, 5)} compact /> : <EmptyState icon={Activity} title="No transactions yet" action={<button className="button button-primary" onClick={() => navigate('/transactions/new')}>Create transaction</button>} />}
+      {loading ? <div className="skeleton-list"><Skeleton/><Skeleton/><Skeleton/></div> : recent.length ? <TransactionTable items={recent.slice(0, 5)} compact className="dashboard-transactions" /> : <EmptyState icon={Activity} title="No transactions yet" action={<button className="button button-primary" onClick={() => navigate('/transactions/new')}>Create transaction</button>} />}
     </section>
   </>
 }

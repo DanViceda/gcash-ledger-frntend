@@ -1,6 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import './index.css'
+import './styles/global.css'
 import App from './App.jsx'
 
 if (localStorage.getItem('ledger-theme') === 'dark') document.documentElement.dataset.theme = 'dark'

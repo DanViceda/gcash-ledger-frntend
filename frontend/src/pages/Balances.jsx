@@ -15,6 +15,7 @@ function BalancesPage() {
   const { notify } = useToast()
   const [balances, setBalances] = useState(null)
   const [fundings, setFundings] = useState([])
+  const [adjustments, setAdjustments] = useState([])
   const [transfers, setTransfers] = useState([])
   const [reconciliations, setReconciliations] = useState([])
   const [loading, setLoading] = useState(true)
@@ -23,6 +24,7 @@ function BalancesPage() {
   const [fundingAccount, setFundingAccount] = useState('CASH')
   const [fundingAmount, setFundingAmount] = useState('')
   const [fundingNotes, setFundingNotes] = useState('')
+  const [adjustmentType, setAdjustmentType] = useState('ADD')
   const [direction, setDirection] = useState('CASH_TO_GCASH')
   const [transferPage, setTransferPage] = useState(0)
   const [transferPages, setTransferPages] = useState(0)
@@ -35,7 +37,7 @@ function BalancesPage() {
   const [actualGcash, setActualGcash] = useState('')
   const [notes, setNotes] = useState('')
   const [busy, setBusy] = useState(false)
-  const fundingKey = useRef(null)
+  const adjustmentKey = useRef(null)
   const transferKey = useRef(null)
   const reconciliationKey = useRef(null)
   const reversalKeys = useRef(new Map())
@@ -43,17 +45,19 @@ function BalancesPage() {
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try {
-      const [balanceResult, fundingResult, transferResult, reconciliationResult] = await Promise.allSettled([
+      const [balanceResult, fundingResult, adjustmentResult, transferResult, reconciliationResult] = await Promise.allSettled([
         api.get('/balances'),
         api.get('/balances/fundings', { params: { page: 0, size: 8 } }),
+        api.get('/balances/adjustments', { params: { page: 0, size: 8 } }),
         api.get('/balances/transfers', { params: { page: transferPage, size: 8 } }),
         api.get('/balances/reconciliations', { params: { page: reconciliationPage, size: 5 } }),
       ])
       if (balanceResult.status === 'fulfilled') setBalances(balanceResult.value.data)
       if (fundingResult.status === 'fulfilled') setFundings(fundingResult.value.data.content || [])
+      if (adjustmentResult.status === 'fulfilled') setAdjustments(adjustmentResult.value.data.content || [])
       if (transferResult.status === 'fulfilled') { setTransfers(transferResult.value.data.content || []); setTransferPages(transferResult.value.data.totalPages); setTransferCount(transferResult.value.data.totalElements) }
       if (reconciliationResult.status === 'fulfilled') { setReconciliations(reconciliationResult.value.data.content || []); setReconciliationPages(reconciliationResult.value.data.totalPages); setReconciliationCount(reconciliationResult.value.data.totalElements) }
-      const failed = [balanceResult, fundingResult, transferResult, reconciliationResult].find((item) => item.status === 'rejected')
+      const failed = [balanceResult, fundingResult, adjustmentResult, transferResult, reconciliationResult].find((item) => item.status === 'rejected')
       if (failed) setError(errorMessage(failed.reason, 'Some balance information could not be loaded.'))
     } catch (err) { setError(errorMessage(err, 'Could not load balances.')) }
     finally { setLoading(false) }
@@ -62,22 +66,25 @@ function BalancesPage() {
   useEffect(() => { void Promise.resolve().then(load) }, [load])
 
   function openFunding(account) {
-    setFundingAccount(account); setFundingAmount(''); setFundingNotes(''); fundingKey.current = null; setError(''); setFundingOpen(true)
+    setFundingAccount(account); setFundingAmount(''); setFundingNotes(''); setAdjustmentType('ADD'); adjustmentKey.current = null; setError(''); setFundingOpen(true)
   }
 
   async function addFunding(event) {
     event.preventDefault()
     const amountCentavos = pesosToCentavos(fundingAmount)
     if (!Number.isSafeInteger(amountCentavos) || amountCentavos <= 0) { setError('Enter an amount greater than zero.'); return }
+    const reason = fundingNotes.trim()
+    if (!reason) { setError('Enter a reason for this adjustment.'); return }
     setBusy(true); setError('')
     try {
-      if (!fundingKey.current) fundingKey.current = { key: newIdempotencyKey(), account: fundingAccount, amountCentavos, notes: fundingNotes.trim() || null }
-      const request = fundingKey.current
-      await api.post('/balances/fundings', { account: request.account, amountCentavos: request.amountCentavos, notes: request.notes }, { headers: { 'Idempotency-Key': request.key } })
-      fundingKey.current = null; setFundingOpen(false); setFundingAmount(''); setFundingNotes('')
-      notify(`${fundingAccount === 'CASH' ? 'Cash' : 'GCash'} balance updated.`, 'success')
+      if (!adjustmentKey.current) adjustmentKey.current = { key: newIdempotencyKey(), account: fundingAccount, adjustmentType, amountCentavos, reason }
+      const request = adjustmentKey.current
+      await api.post('/balances/adjustments', { account: request.account, adjustmentType: request.adjustmentType, amountCentavos: request.amountCentavos, reason: request.reason }, { headers: { 'Idempotency-Key': request.key } })
+      setFundingOpen(false); setFundingAmount(''); setFundingNotes('')
+      adjustmentKey.current = null
+      notify(`${fundingAccount === 'CASH' ? 'Cash' : 'GCash'} balance ${adjustmentType === 'ADD' ? 'increased' : 'deducted'}.`, 'success')
       await load()
-    } catch (err) { setError(errorMessage(err, 'Could not add funds.')) }
+    } catch (err) { setError(errorMessage(err, 'Could not save balance adjustment.')) }
     finally { setBusy(false) }
   }
 
@@ -111,20 +118,24 @@ function BalancesPage() {
     {error && <div className="alert alert-error" role="alert">{error}<button className="text-button" onClick={load}>Retry</button></div>}
     <section className="balance-grid">
       {loading ? <><div className="metric-card"><Skeleton className="sk-label"/><Skeleton className="sk-metric"/></div><div className="metric-card"><Skeleton className="sk-label"/><Skeleton className="sk-metric"/></div></> : <>
-        <div className="balance-account"><MetricCard icon={Banknote} label="Cash Balance" amount={money(balances?.cashCentavos)} tone="metric-green"/><button className="button button-primary" onClick={() => openFunding('CASH')}>Add Cash</button></div>
-        <div className="balance-account"><MetricCard icon={Wallet} label="GCash Balance" amount={money(balances?.gcashCentavos)} tone="metric-ink"/><button className="button button-primary" onClick={() => openFunding('GCASH')}>Add GCash</button></div>
+        <div className="balance-account"><MetricCard icon={Banknote} label="Cash Balance" amount={money(balances?.cashCentavos)} tone="metric-green"/><button className="button button-primary" onClick={() => openFunding('CASH')}>Adjust Cash</button></div>
+        <div className="balance-account"><MetricCard icon={Wallet} label="GCash Balance" amount={money(balances?.gcashCentavos)} tone="metric-ink"/><button className="button button-primary" onClick={() => openFunding('GCASH')}>Adjust GCash</button></div>
       </>}
     </section>
     <div className="two-column-grid"><section className="panel balance-form-card"><div className="section-header"><div><h2>Balance transfer</h2><p className="muted">Transfers do not have a fee.</p></div><span className="subtle-icon"><ArrowLeftRight size={20}/></span></div><form className="form-stack" onSubmit={createTransfer}><label className="field"><span>Direction</span><select value={direction} onChange={(e) => setDirection(e.target.value)}><option value="CASH_TO_GCASH">Cash to GCash</option><option value="GCASH_TO_CASH">GCash to cash</option></select></label><label className="field"><span>Amount in pesos</span><MoneyInput value={transferAmount} onChange={setTransferAmount}/></label><label className="field"><span>Notes · optional</span><input maxLength="2000" value={notes} onChange={(e) => setNotes(e.target.value)} /></label><button className="button button-primary" disabled={busy || !transferAmount}>Record transfer <ArrowRight size={17}/></button></form></section>
       <section className="panel balance-form-card"><div className="section-header"><div><h2>Reconcile balances</h2></div><span className="subtle-icon amber"><CircleHelp size={20}/></span></div><form className="form-stack" onSubmit={reconcile}><label className="field"><span>Actual cash in pesos</span><MoneyInput value={actualCash} onChange={setActualCash}/></label><label className="field"><span>Actual GCash in pesos</span><MoneyInput value={actualGcash} onChange={setActualGcash}/></label><label className="field"><span>Notes · optional</span><input maxLength="4000" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Explain any difference" /></label><button className="button button-secondary" disabled={busy || actualCash === '' || actualGcash === ''}>Save reconciliation</button></form><p className="reconcile-note">Reconciliation records a difference; it does not adjust expected balances.</p></section></div>
     <section className="panel table-panel"><div className="section-header"><h2>Balance additions</h2></div>{loading ? <div className="skeleton-list"><Skeleton/><Skeleton/></div> : fundings.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>Account</th><th>Amount</th><th>Note</th><th>Added by</th><th>Date</th></tr></thead><tbody>{fundings.map((funding) => <tr key={funding.id}><td>{funding.account === 'CASH' ? 'Cash' : 'GCash'}</td><td className="money-cell">{money(funding.amountCentavos)}</td><td>{funding.notes || '—'}</td><td>{funding.addedBy}</td><td>{dateTime(funding.createdAt)}</td></tr>)}</tbody></table></div> : <EmptyState icon={Banknote} title="No balance additions yet" />}</section>
+    <section className="panel table-panel"><div className="section-header"><div><h2>Balance adjustments</h2><p className="muted">Additions and deductions, newest first</p></div></div>{loading ? <div className="skeleton-list"><Skeleton/><Skeleton/></div> : adjustments.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>Account</th><th>Action</th><th>Amount</th><th>Reason</th><th>Before</th><th>After</th><th>Recorded by</th><th>Date</th></tr></thead><tbody>{adjustments.map((item) => <tr key={item.id}><td>{item.account === 'CASH' ? 'Cash' : 'GCash'}</td><td><span className={`status-pill ${item.adjustmentType === 'ADD' ? 'status-completed' : 'status-voided'}`}>{item.adjustmentType === 'ADD' ? 'Added' : 'Deducted'}</span></td><td className="money-cell">{money(item.amountCentavos)}</td><td>{item.reason}</td><td className="balance-pair">Cash {money(item.previousCashCentavos)}<br/>GCash {money(item.previousGcashCentavos)}</td><td className="balance-pair">Cash {money(item.resultingCashCentavos)}<br/>GCash {money(item.resultingGcashCentavos)}</td><td>{item.createdBy}</td><td>{dateTime(item.createdAt)}</td></tr>)}</tbody></table></div> : <EmptyState icon={Banknote} title="No balance adjustments yet" />}</section>
     <section className="panel table-panel"><div className="section-header"><h2>Transfer history</h2></div>{loading ? <div className="skeleton-list"><Skeleton/><Skeleton/></div> : transfers.length ? <><div className="table-scroll"><table className="data-table"><thead><tr><th>Direction</th><th>Amount</th><th>Balances before</th><th>Balances after</th><th>Date</th><th>Reversal</th></tr></thead><tbody>{transfers.map((transfer) => { const reversedBy = transfers.find((entry) => entry.reversalOfId === transfer.id); return <tr key={transfer.id}><td><span className="transfer-direction">{transfer.direction === 'CASH_TO_GCASH' ? 'Cash → GCash' : 'GCash → Cash'}</span><small className="table-subline">#{transfer.id}{transfer.reversalOfId ? ` · reverses #${transfer.reversalOfId}` : ''}</small></td><td className="money-cell">{money(transfer.amountCentavos)}</td><td className="balance-pair">Cash {money(transfer.previousCashCentavos)}<br/>GCash {money(transfer.previousGcashCentavos)}</td><td className="balance-pair">Cash {money(transfer.resultingCashCentavos)}<br/>GCash {money(transfer.resultingGcashCentavos)}</td><td>{dateTime(transfer.createdAt)}</td><td>{transfer.reversalOfId ? <span className="status-pill status-voided">Reversal</span> : reversedBy ? <span className="status-pill status-voided">Reversed #{reversedBy.id}</span> : <button className="button button-quiet button-small" disabled={busy} onClick={() => reverseTransfer(transfer)}>Reverse</button>}</td></tr>})}</tbody></table></div><Pagination page={transferPage} totalPages={transferPages} totalElements={transferCount} onChange={setTransferPage}/></> : <EmptyState icon={ArrowLeftRight} title="No transfers recorded" />}</section>
     <section className="panel table-panel"><div className="section-header"><h2>Reconciliation history</h2></div>{loading ? <div className="skeleton-list"><Skeleton/><Skeleton/></div> : reconciliations.length ? <><div className="table-scroll"><table className="data-table"><thead><tr><th>Recorded</th><th>Cash variance</th><th>GCash variance</th><th>Notes</th></tr></thead><tbody>{reconciliations.map((record) => <tr key={record.id}><td>{dateTime(record.createdAt)}</td><td><Variance amount={record.cashDifferenceCentavos} status={record.cashVariance}/></td><td><Variance amount={record.gcashDifferenceCentavos} status={record.gcashVariance}/></td><td>{record.notes || '—'}</td></tr>)}</tbody></table></div><Pagination page={reconciliationPage} totalPages={reconciliationPages} totalElements={reconciliationCount} onChange={setReconciliationPage}/></> : <EmptyState icon={FileText} title="No reconciliations yet" />}</section>
-    {fundingOpen && <Modal title={`Add ${fundingAccount === 'CASH' ? 'Cash' : 'GCash'} Balance`} onClose={() => { if (!busy) setFundingOpen(false) }}><form className="form-stack" onSubmit={addFunding}>
-      <label className="field"><span>Amount in pesos</span><MoneyInput min="0.01" value={fundingAmount} onChange={(value) => { setFundingAmount(value); if (fundingKey.current?.amountCentavos !== pesosToCentavos(value)) fundingKey.current = null }}/></label>
-      <label className="field"><span>Note · optional</span><input maxLength="2000" value={fundingNotes} onChange={(event) => { setFundingNotes(event.target.value); if (fundingKey.current?.notes !== event.target.value.trim()) fundingKey.current = null }} /></label>
+    {fundingOpen && <Modal title="Adjust balance" onClose={() => { if (!busy) setFundingOpen(false) }}><form className="form-stack" onSubmit={addFunding}>
+      <label className="field"><span>Account</span><select value={fundingAccount} onChange={(event) => { setFundingAccount(event.target.value); adjustmentKey.current = null }}><option value="CASH">Cash</option><option value="GCASH">GCash</option></select></label>
+      <label className="field"><span>Adjustment</span><select value={adjustmentType} onChange={(event) => { setAdjustmentType(event.target.value); adjustmentKey.current = null }}><option value="ADD">Add funds</option><option value="DEDUCT">Deduct funds</option></select></label>
+      <label className="field"><span>Amount in pesos</span><MoneyInput min="0.01" value={fundingAmount} onChange={(value) => { setFundingAmount(value); adjustmentKey.current = null }}/></label>
+      <label className="field"><span>Reason · required</span><input required maxLength="2000" value={fundingNotes} onChange={(event) => { setFundingNotes(event.target.value); adjustmentKey.current = null }} placeholder="Explain why this change is needed" /></label>
+      {balances && fundingAmount && Number.isSafeInteger(pesosToCentavos(fundingAmount)) && pesosToCentavos(fundingAmount) > 0 && <div className="adjustment-preview" data-direction={adjustmentType} aria-live="polite"><strong>Review adjustment</strong><span>Account <b>{fundingAccount === 'CASH' ? 'Cash' : 'GCash'}</b></span><span>Adjustment <b>{adjustmentType === 'ADD' ? 'Add funds' : 'Deduct funds'}</b></span><span>Amount <b>{money(pesosToCentavos(fundingAmount))}</b></span><span>Current balance <b>{money(fundingAccount === 'CASH' ? balances.cashCentavos : balances.gcashCentavos)}</b></span><span>Resulting balance <b>{money(BigInt(fundingAccount === 'CASH' ? balances.cashCentavos : balances.gcashCentavos) + BigInt(pesosToCentavos(fundingAmount)) * (adjustmentType === 'ADD' ? 1n : -1n))}</b></span>{fundingNotes.trim() && <span>Reason <b>{fundingNotes.trim()}</b></span>}</div>}
       {error && <div className="alert alert-error" role="alert">{error}</div>}
-      <div className="modal-actions"><button type="button" className="button button-secondary" disabled={busy} onClick={() => setFundingOpen(false)}>Cancel</button><button className="button button-primary" disabled={busy || !fundingAmount}>{busy ? <><span className="spinner spinner-light"/> Adding…</> : `Confirm Add ${fundingAccount === 'CASH' ? 'Cash' : 'GCash'}`}</button></div>
+      <div className="modal-actions"><button type="button" className="button button-secondary" disabled={busy} onClick={() => setFundingOpen(false)}>Cancel</button><button className="button button-primary" disabled={busy || !fundingAmount || !fundingNotes.trim()}>{busy ? <><span className="spinner spinner-light"/> Saving…</> : `Confirm ${adjustmentType === 'ADD' ? 'Add' : 'Deduct'} ${fundingAccount === 'CASH' ? 'Cash' : 'GCash'}`}</button></div>
     </form></Modal>}
   </>
 }
